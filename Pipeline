@@ -1,0 +1,82 @@
+Step 1: Preparation:
+
+# Create working directories
+
+mkdir -p {raw_data,fastqc,trimmed,aligned,variants,annotation}
+
+# Moving FASTQ files to raw_data directory
+mv *.fq raw_data/
+
+# Preparing a sample list
+ls raw_data/*.fq | sed 's/_FDSW.*//' | sed 's/raw_data\///' | sort -u > sample_list.txt
+
+
+
+
+Step 2: Quality Control (QC)
+Performing QC on raw FASTQs using FastQC and summarize with MultiQC.
+
+# Run FastQC
+for file in raw_data/*.fq; do
+    fastqc -o fastqc $file
+done
+
+# Summarize QC reports with MultiQC
+multiqc fastqc -o fastqc/multiqc_report
+
+Step 3: Alignment
+# Index the reference genome
+
+bwa index reference/Salmonella_ATCC14028.fasta
+samtools faidx reference/Salmonella_ATCC14028.fasta
+picard CreateSequenceDictionary R=reference/Salmonella_ATCC14028.fasta O=reference/Salmonella_ATCC14028.dict
+
+# Align trimmed reads to the reference
+
+while read SAMPLE; do
+    bwa mem -t 8 -R "@RG\tID:$SAMPLE\tSM:$SAMPLE\tPL:ILLUMINA" reference/Salmonella_ATCC14028.fasta trimmed/${SAMPLE}.trim.fq.gz | \
+    samtools sort -@4 -o aligned/${SAMPLE}.sorted.bam -
+done < sample_list.txt
+
+Step 5: BAM Processing
+# Mark duplicates and index BAMs
+
+for file in aligned/*.sorted.bam; do
+    base=$(basename "$file" .sorted.bam)
+    picard MarkDuplicates I=$file O=aligned/${base}_dedup.bam M=aligned/${base}_dup_metrics.txt REMOVE_DUPLICATES=false
+    samtools index aligned/${base}_dedup.bam
+done
+
+Step 6: Variant Calling
+# Call variants using BCFtools
+
+for file in aligned/*_dedup.bam; do
+    base=$(basename "$file" _dedup.bam)
+    bcftools mpileup -Ou -f reference/Salmonella_ATCC14028.fasta $file | \
+        bcftools call -mv -Ov -o variants/${base}.raw.vcf
+done
+# Filter and normalize VCFs
+
+for file in variants/*.raw.vcf; do
+    base=$(basename "$file" .raw.vcf)
+    bcftools filter -Ov -o variants/${base}.filtered.vcf -s LOWQUAL -e 'QUAL<20 || DP<10' $file
+    bcftools norm -f reference/Salmonella_ATCC14028.fasta -Ov -o variants/${base}.norm.vcf variants/${base}.filtered.vcf
+done
+
+Step 7: Merge VCFs
+# Merge individual VCFs into a single VCF.
+
+bcftools merge -m all -Ov -o variants/all_isolates.vcf variants/*.norm.vcf
+Step 8: Annotation (Optional)
+Annotate variants using SnpEff.
+
+Step 8: Build SnpEff database
+
+#Download the GenBank file for ATCC 14028 and build the SnpEff database.
+
+snpEff build -genbank -v ATCC14028
+
+#Annotate the merged VCF
+
+snpeff -v ATCC14028 variants/all_isolates.vcf > variants/all_isolates.annotated.vcf
+
